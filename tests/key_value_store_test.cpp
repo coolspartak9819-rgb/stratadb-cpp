@@ -1,14 +1,16 @@
 #include "storage/key_value_store.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <string>
+#include <thread>
 
 int main() {
     const auto path = std::filesystem::temp_directory_path() / "stratadb-test.wal";
     std::filesystem::remove(path);
     {
-        stratadb::KeyValueStore store(path);
+        stratadb::KeyValueStore store(path, 128);
         store.put("name", "strata");
         store.put("name", "stratadb");
         assert(store.get("name") == "stratadb");
@@ -22,11 +24,18 @@ int main() {
         restored.put("binary", "value with spaces");
         restored.put("compacted", "before compaction");
         restored.compact();
+        const auto compactions_before = restored.compactions_total();
+        restored.put("background", std::string(256, 'x'));
+        for (int attempt = 0; attempt < 100 && restored.compactions_total() == compactions_before; ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        assert(restored.compactions_total() > compactions_before);
     }
     {
         stratadb::KeyValueStore restored(path);
         assert(restored.get("binary") == "value with spaces");
         assert(restored.get("compacted") == "before compaction");
+        assert(restored.get("background") == std::string(256, 'x'));
     }
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".sst");

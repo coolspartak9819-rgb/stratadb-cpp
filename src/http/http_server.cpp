@@ -152,7 +152,7 @@ void HttpServer::handle_client(int client_fd) {
         } else if (request.target == "/health") {
             response(client_fd, 200, "application/json", "{\"status\":\"ok\"}");
         } else if (request.target == "/metrics") {
-            response(client_fd, 200, "text/plain; version=0.0.4", "stratadb_http_requests_total " + std::to_string(requests_total_.load()) + "\nstratadb_keys " + std::to_string(store_.size()) + "\n");
+            response(client_fd, 200, "text/plain; version=0.0.4", "stratadb_http_requests_total " + std::to_string(requests_total_.load()) + "\nstratadb_keys " + std::to_string(store_.size()) + "\nstratadb_compactions_total " + std::to_string(store_.compactions_total()) + "\n");
         } else if (request.target == "/compact" && request.method == "POST") {
             store_.compact();
             response(client_fd, 200, "application/json", "{\"status\":\"compacted\"}");

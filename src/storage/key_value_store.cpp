@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -25,8 +26,13 @@ bool read_u32(std::istream& input, std::uint32_t& value) {
 
 }  // namespace
 
-KeyValueStore::KeyValueStore(std::filesystem::path wal_path)
-    : wal_path_(std::move(wal_path)), sstable_path_(wal_path_.string() + ".sst") {
+KeyValueStore::KeyValueStore(std::filesystem::path wal_path, std::uintmax_t compaction_threshold_bytes)
+    : wal_path_(std::move(wal_path)),
+      sstable_path_(wal_path_.string() + ".sst"),
+      compaction_threshold_bytes_(compaction_threshold_bytes) {
+    if (compaction_threshold_bytes_ == 0) {
+        throw std::invalid_argument("compaction threshold must be greater than zero");
+    }
     if (wal_path_.has_parent_path()) {
         std::filesystem::create_directories(wal_path_.parent_path());
     }
@@ -36,9 +42,18 @@ KeyValueStore::KeyValueStore(std::filesystem::path wal_path)
     if (!wal_) {
         throw std::runtime_error("unable to open WAL: " + wal_path_.string());
     }
+    compaction_thread_ = std::thread(&KeyValueStore::compaction_loop, this);
 }
 
 KeyValueStore::~KeyValueStore() {
+    {
+        std::scoped_lock lock(mutex_);
+        stopping_ = true;
+    }
+    compaction_condition_.notify_one();
+    if (compaction_thread_.joinable()) {
+        compaction_thread_.join();
+    }
     std::scoped_lock lock(mutex_);
     wal_.flush();
 }
@@ -78,6 +93,16 @@ std::size_t KeyValueStore::size() const {
 
 void KeyValueStore::compact() {
     std::scoped_lock lock(mutex_);
+    compact_locked();
+    compaction_requested_ = false;
+}
+
+std::uint64_t KeyValueStore::compactions_total() const {
+    std::scoped_lock lock(mutex_);
+    return compactions_total_;
+}
+
+void KeyValueStore::compact_locked() {
     write_sstable();
     wal_.close();
     std::ofstream truncate(wal_path_, std::ios::binary | std::ios::trunc);
@@ -88,6 +113,34 @@ void KeyValueStore::compact() {
     wal_.open(wal_path_, std::ios::binary | std::ios::app);
     if (!wal_) {
         throw std::runtime_error("unable to reopen WAL: " + wal_path_.string());
+    }
+    ++compactions_total_;
+}
+
+void KeyValueStore::compaction_loop() {
+    while (true) {
+        std::unique_lock lock(mutex_);
+        compaction_condition_.wait(lock, [this] {
+            return stopping_ || compaction_requested_;
+        });
+        if (stopping_) {
+            return;
+        }
+        compaction_requested_ = false;
+        try {
+            compact_locked();
+        } catch (const std::exception& error) {
+            std::cerr << "StrataDB compaction failed: " << error.what() << '\n';
+        }
+    }
+}
+
+void KeyValueStore::request_compaction_if_needed() {
+    std::error_code error;
+    const auto wal_size = std::filesystem::file_size(wal_path_, error);
+    if (!error && wal_size >= compaction_threshold_bytes_) {
+        compaction_requested_ = true;
+        compaction_condition_.notify_one();
     }
 }
 
@@ -200,6 +253,7 @@ void KeyValueStore::append_record(char operation, const std::string& key, const 
     if (!wal_) {
         throw std::runtime_error("unable to append WAL record");
     }
+    request_compaction_if_needed();
 }
 
 }  // namespace stratadb

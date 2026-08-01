@@ -1,18 +1,22 @@
 #pragma once
 
 #include <cstddef>
+#include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace stratadb {
 
 class KeyValueStore {
 public:
-    explicit KeyValueStore(std::filesystem::path wal_path);
+    explicit KeyValueStore(std::filesystem::path wal_path,
+                           std::uintmax_t compaction_threshold_bytes = 4 * 1024 * 1024);
     ~KeyValueStore();
 
     KeyValueStore(const KeyValueStore&) = delete;
@@ -23,18 +27,28 @@ public:
     bool erase(const std::string& key);
     std::size_t size() const;
     void compact();
+    std::uint64_t compactions_total() const;
 
 private:
     void replay_sstable();
     void replay();
     void append_record(char operation, const std::string& key, const std::string& value);
     void write_sstable();
+    void compact_locked();
+    void compaction_loop();
+    void request_compaction_if_needed();
 
     std::filesystem::path wal_path_;
     std::filesystem::path sstable_path_;
+    std::uintmax_t compaction_threshold_bytes_;
     mutable std::mutex mutex_;
+    std::condition_variable compaction_condition_;
     std::unordered_map<std::string, std::string> values_;
     std::ofstream wal_;
+    std::thread compaction_thread_;
+    bool stopping_{false};
+    bool compaction_requested_{false};
+    std::uint64_t compactions_total_{0};
 };
 
 }  // namespace stratadb

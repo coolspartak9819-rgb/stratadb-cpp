@@ -18,6 +18,7 @@ The first vertical slice includes:
 • thread-safe in-memory key-value storage;
 • append-only binary WAL;
 • replay and recovery after process restart;
+• background compaction when the WAL reaches its configured threshold;
 • HTTP API for `GET`, `PUT` and `DELETE`;
 • health endpoint and Prometheus-style metrics;
 • a minimal browser status page;
@@ -30,6 +31,7 @@ The first vertical slice includes:
 | Durable writes | Every `PUT` and `DELETE` is appended to the binary WAL before the in-memory state changes |
 | Crash recovery | The WAL is replayed during startup and restores the latest state |
 | Compaction | `POST /compact` writes a sorted SSTable and safely resets the WAL |
+| Background maintenance | A dedicated worker compacts the WAL asynchronously after the size threshold is reached |
 | Concurrent access | Store operations are protected by a mutex and HTTP requests are handled in separate threads |
 | HTTP interface | `GET`, `PUT`, `DELETE`, health, metrics and a browser status page |
 | Reproducible delivery | Docker image, Compose setup, CMake tests and GitHub Actions CI |
@@ -105,7 +107,8 @@ a Docker image build on every push and pull request.
 
 The storage format is intentionally small and inspectable: each mutation is
 written as an operation byte followed by key and value lengths and their raw
-bytes. The store replays this append-only log before accepting requests.
+bytes. The store replays the SSTable first and then the append-only WAL before
+accepting requests. A background worker keeps the WAL from growing forever.
 
 ## Local Build
 
