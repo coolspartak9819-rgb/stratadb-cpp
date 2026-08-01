@@ -1,0 +1,30 @@
+services:
+  primary:
+    build: .
+    command: ["/app/data/primary.wal", "8080"]
+    ports:
+      - "18080:8080"
+    volumes:
+      - stratadb-primary:/app/data
+    healthcheck:
+      test: ["CMD", "sh", "-c", "printf '' | nc -z localhost 8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  replica:
+    build: .
+    command: ["/app/data/replica.wal", "8080"]
+    ports:
+      - "18081:8080"
+    volumes:
+      - stratadb-replica:/app/data
+    healthcheck:
+      test: ["CMD", "sh", "-c", "printf '' | nc -z localhost 8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  stratadb-primary:
+  stratadb-replica:

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="260" viewBox="0 0 920 260" role="img" aria-labelledby="title desc">
+  <title id="title">StrataDB snapshot replication</title>
+  <desc id="desc">A primary node exports a binary SSTable snapshot over HTTP and a replica imports it.</desc>
+  <rect width="920" height="260" rx="18" fill="#09131c"/>
+  <text x="40" y="48" fill="#f1f7f8" font-family="Arial, sans-serif" font-size="24" font-weight="700">Two-node snapshot sync</text>
+  <text x="40" y="75" fill="#91a9b1" font-family="Arial, sans-serif" font-size="14">Explicit state transfer over the replication HTTP endpoint</text>
+  <rect x="55" y="115" width="240" height="90" rx="12" fill="#173542" stroke="#35d6ad"/>
+  <text x="175" y="150" text-anchor="middle" fill="#35d6ad" font-family="Arial, sans-serif" font-size="18" font-weight="700">Primary</text>
+  <text x="175" y="177" text-anchor="middle" fill="#d5e3e6" font-family="Arial, sans-serif" font-size="14">GET /replication/snapshot</text>
+  <rect x="625" y="115" width="240" height="90" rx="12" fill="#253348" stroke="#6e93e5"/>
+  <text x="745" y="150" text-anchor="middle" fill="#a9c1ff" font-family="Arial, sans-serif" font-size="18" font-weight="700">Replica</text>
+  <text x="745" y="177" text-anchor="middle" fill="#d5e3e6" font-family="Arial, sans-serif" font-size="14">POST /replication/snapshot</text>
+  <path d="M310 160 H610" stroke="#f0b866" stroke-width="3" stroke-dasharray="9 7"/>
+  <path d="M595 151 L615 160 L595 169" fill="none" stroke="#f0b866" stroke-width="3"/>
+  <text x="460" y="145" text-anchor="middle" fill="#f0b866" font-family="Arial, sans-serif" font-size="14">binary SSTable snapshot</text>
+</svg>

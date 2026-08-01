@@ -34,6 +34,7 @@ The first vertical slice includes:
 | Compaction | `POST /compact` writes a sorted SSTable and safely resets the WAL |
 | Background maintenance | A dedicated worker compacts the WAL asynchronously after the size threshold is reached |
 | TTL | `PUT /kv/key?ttl=60` expires the key after 60 seconds and survives restart |
+| Snapshot sync | A replica can import a binary snapshot from another StrataDB node |
 | Concurrent access | Store operations are protected by a mutex and HTTP requests are handled in separate threads |
 | HTTP interface | `GET`, `PUT`, `DELETE`, health, metrics and a browser status page |
 | Reproducible delivery | Docker image, Compose setup, CMake tests and GitHub Actions CI |
@@ -47,6 +48,8 @@ DELETE /kv/user-1 ─►  WAL append  ──►  memory erase  ──►  204 No
 GET /metrics    ──►  request counter + key count
 POST /compact   ──►  sorted SSTable snapshot + WAL reset
 PUT /kv/key?ttl=60 ──►  durable value with expiration timestamp
+GET /replication/snapshot ──►  binary SSTable snapshot
+POST /replication/snapshot ──►  replace local state from snapshot
 ```
 
 ## Run
@@ -89,6 +92,26 @@ Store a value with a one-minute TTL:
 curl -X PUT 'http://localhost:8080/kv/session?ttl=60' \
   --data 'temporary value'
 ```
+
+## Two-Node Snapshot Sync
+
+The repository includes a two-node Compose demo. It is deliberately snapshot
+replication, not a pretend consensus algorithm: the primary serves a complete
+binary snapshot and the replica atomically installs it.
+
+![Snapshot replication](docs/replication.svg)
+
+```bash
+docker compose -f docker-compose.cluster.yml up --build -d
+curl -X PUT http://localhost:18080/kv/order-1 --data 'ready'
+curl http://localhost:18080/replication/snapshot > /tmp/stratadb.snapshot
+curl -X POST http://localhost:18081/replication/snapshot \
+  --data-binary @/tmp/stratadb.snapshot
+curl http://localhost:18081/kv/order-1
+```
+
+The next replication milestone is incremental WAL shipping with sequence
+numbers, followed by leader election and quorum acknowledgements.
 
 The WAL is mounted at `data/stratadb.wal`. Restarting the container restores
 the key-value state from the log.

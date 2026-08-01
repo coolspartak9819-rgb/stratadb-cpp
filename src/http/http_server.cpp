@@ -175,6 +175,11 @@ void HttpServer::handle_client(int client_fd) {
             response(client_fd, 200, "application/json", "{\"status\":\"ok\"}");
         } else if (path == "/metrics") {
             response(client_fd, 200, "text/plain; version=0.0.4", "stratadb_http_requests_total " + std::to_string(requests_total_.load()) + "\nstratadb_keys " + std::to_string(store_.size()) + "\nstratadb_compactions_total " + std::to_string(store_.compactions_total()) + "\n");
+        } else if (path == "/replication/snapshot" && request.method == "GET") {
+            response(client_fd, 200, "application/octet-stream", store_.export_snapshot());
+        } else if (path == "/replication/snapshot" && request.method == "POST") {
+            store_.import_snapshot(request.body);
+            response(client_fd, 200, "application/json", "{\"status\":\"snapshot imported\"}");
         } else if (path == "/compact" && request.method == "POST") {
             store_.compact();
             response(client_fd, 200, "application/json", "{\"status\":\"compacted\"}");

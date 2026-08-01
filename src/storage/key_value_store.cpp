@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -134,6 +135,49 @@ void KeyValueStore::compact() {
 std::uint64_t KeyValueStore::compactions_total() const {
     std::scoped_lock lock(mutex_);
     return compactions_total_;
+}
+
+std::string KeyValueStore::export_snapshot() {
+    std::scoped_lock lock(mutex_);
+    write_sstable();
+    std::ifstream input(sstable_path_, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("unable to read snapshot: " + sstable_path_.string());
+    }
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+void KeyValueStore::import_snapshot(const std::string& snapshot) {
+    if (snapshot.empty()) {
+        throw std::invalid_argument("snapshot must not be empty");
+    }
+    std::scoped_lock lock(mutex_);
+    const auto temporary_path = sstable_path_.string() + ".incoming";
+    {
+        std::ofstream output(temporary_path, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw std::runtime_error("unable to create incoming snapshot");
+        }
+        output.write(snapshot.data(), static_cast<std::streamsize>(snapshot.size()));
+        output.flush();
+        if (!output) {
+            throw std::runtime_error("unable to write incoming snapshot");
+        }
+    }
+    std::filesystem::rename(temporary_path, sstable_path_);
+    wal_.close();
+    std::ofstream truncate(wal_path_, std::ios::binary | std::ios::trunc);
+    if (!truncate) {
+        throw std::runtime_error("unable to truncate WAL during snapshot import");
+    }
+    truncate.close();
+    values_.clear();
+    replay_sstable();
+    wal_.open(wal_path_, std::ios::binary | std::ios::app);
+    if (!wal_) {
+        throw std::runtime_error("unable to reopen WAL after snapshot import");
+    }
+    compaction_requested_ = false;
 }
 
 void KeyValueStore::compact_locked() {

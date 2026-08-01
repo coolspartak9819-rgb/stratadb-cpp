@@ -30,6 +30,8 @@ public:
     std::size_t size() const;
     void compact();
     std::uint64_t compactions_total() const;
+    std::string export_snapshot();
+    void import_snapshot(const std::string& snapshot);
 
 private:
     struct ValueEntry {

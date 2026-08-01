@@ -41,6 +41,16 @@ int main() {
         restored.put("short-ttl", "temporary", std::chrono::seconds(1));
         std::this_thread::sleep_for(std::chrono::milliseconds(1100));
         assert(!restored.get("short-ttl"));
+
+        const auto follower_path = std::filesystem::temp_directory_path() / "stratadb-follower.wal";
+        std::filesystem::remove(follower_path);
+        std::filesystem::remove(follower_path.string() + ".sst");
+        stratadb::KeyValueStore follower(follower_path);
+        follower.import_snapshot(restored.export_snapshot());
+        assert(follower.get("binary") == "value with spaces");
+        assert(follower.get("persistent-ttl") == "still alive");
+        std::filesystem::remove(follower_path);
+        std::filesystem::remove(follower_path.string() + ".sst");
     }
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".sst");
