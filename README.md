@@ -58,7 +58,7 @@ POST /replication/snapshot ──►  replace local state from snapshot
 docker compose up --build
 ```
 
-Open [http://localhost:8080](http://localhost:8080).
+
 
 Store a value:
 
