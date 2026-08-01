@@ -9,6 +9,8 @@
 int main() {
     const auto path = std::filesystem::temp_directory_path() / "stratadb-test.wal";
     std::filesystem::remove(path);
+    std::filesystem::remove(path.string() + ".sst");
+    std::filesystem::remove(path.string() + ".repl");
     {
         stratadb::KeyValueStore store(path, 128);
         store.put("name", "strata");
@@ -45,13 +47,21 @@ int main() {
         const auto follower_path = std::filesystem::temp_directory_path() / "stratadb-follower.wal";
         std::filesystem::remove(follower_path);
         std::filesystem::remove(follower_path.string() + ".sst");
+        std::filesystem::remove(follower_path.string() + ".repl");
         stratadb::KeyValueStore follower(follower_path);
         follower.import_snapshot(restored.export_snapshot());
         assert(follower.get("binary") == "value with spaces");
         assert(follower.get("persistent-ttl") == "still alive");
+        restored.put("incremental", "from journal");
+        const auto changes = restored.export_changes(follower.last_sequence());
+        follower.import_changes(changes);
+        follower.import_changes(changes);
+        assert(follower.get("incremental") == "from journal");
         std::filesystem::remove(follower_path);
         std::filesystem::remove(follower_path.string() + ".sst");
+        std::filesystem::remove(follower_path.string() + ".repl");
     }
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".sst");
+    std::filesystem::remove(path.string() + ".repl");
 }

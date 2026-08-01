@@ -32,6 +32,9 @@ public:
     std::uint64_t compactions_total() const;
     std::string export_snapshot();
     void import_snapshot(const std::string& snapshot);
+    std::string export_changes(std::uint64_t after_sequence) const;
+    void import_changes(const std::string& changes);
+    std::uint64_t last_sequence() const;
 
 private:
     struct ValueEntry {
@@ -43,7 +46,9 @@ private:
     static bool is_expired(const ValueEntry& entry, std::int64_t current_time_ms);
     void replay_sstable();
     void replay();
+    void replay_replication_index();
     void append_record(char operation, const std::string& key, const std::string& value);
+    void append_replication_record(std::uint64_t sequence, char operation, const std::string& key, const std::string& payload);
     void write_sstable();
     void compact_locked();
     void compaction_loop();
@@ -51,11 +56,13 @@ private:
 
     std::filesystem::path wal_path_;
     std::filesystem::path sstable_path_;
+    std::filesystem::path replication_path_;
     std::uintmax_t compaction_threshold_bytes_;
     mutable std::mutex mutex_;
     std::condition_variable compaction_condition_;
     std::unordered_map<std::string, ValueEntry> values_;
     std::ofstream wal_;
+    std::uint64_t next_sequence_{1};
     std::thread compaction_thread_;
     bool stopping_{false};
     bool compaction_requested_{false};

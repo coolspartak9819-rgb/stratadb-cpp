@@ -42,6 +42,19 @@ std::optional<std::chrono::seconds> parse_ttl(const std::string& target) {
     return std::chrono::seconds(seconds);
 }
 
+std::uint64_t parse_after_sequence(const std::string& target) {
+    const auto query_start = target.find('?');
+    if (query_start == std::string::npos) {
+        return 0;
+    }
+    const auto query = target.substr(query_start + 1);
+    constexpr std::string_view prefix = "after=";
+    if (query.rfind(prefix, 0) != 0) {
+        throw std::invalid_argument("invalid after query parameter");
+    }
+    return std::stoull(query.substr(prefix.size()));
+}
+
 std::string html() {
     return R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>StrataDB</title><style>body{margin:0;background:#07090d;color:#eef4f6;font:16px system-ui;padding:40px}main{max-width:760px;margin:auto}h1{font-size:52px;margin:0;color:#18d69b}p{color:#91a0a6}.card{border:1px solid #29404a;background:#0d141a;padding:22px;margin-top:20px}code{color:#24c8ee}</style></head><body><main><div class="card"><h1>StrataDB</h1><p>C++20 durable key-value storage engine</p><p><code>WAL enabled</code> · thread-safe · HTTP API online</p></div></main></body></html>)HTML";
 }
@@ -180,6 +193,13 @@ void HttpServer::handle_client(int client_fd) {
         } else if (path == "/replication/snapshot" && request.method == "POST") {
             store_.import_snapshot(request.body);
             response(client_fd, 200, "application/json", "{\"status\":\"snapshot imported\"}");
+        } else if (path == "/replication/status" && request.method == "GET") {
+            response(client_fd, 200, "application/json", "{\"last_sequence\":" + std::to_string(store_.last_sequence()) + "}");
+        } else if (path == "/replication/changes" && request.method == "GET") {
+            response(client_fd, 200, "application/octet-stream", store_.export_changes(parse_after_sequence(request.target)));
+        } else if (path == "/replication/changes" && request.method == "POST") {
+            store_.import_changes(request.body);
+            response(client_fd, 200, "application/json", "{\"status\":\"changes applied\",\"last_sequence\":" + std::to_string(store_.last_sequence()) + "}");
         } else if (path == "/compact" && request.method == "POST") {
             store_.compact();
             response(client_fd, 200, "application/json", "{\"status\":\"compacted\"}");

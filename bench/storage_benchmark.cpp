@@ -12,6 +12,7 @@ int main() {
     const auto path = std::filesystem::temp_directory_path() / "stratadb-benchmark.wal";
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".sst");
+    std::filesystem::remove(path.string() + ".repl");
 
     constexpr int operations = 10000;
     const std::string value(256, 'x');
@@ -39,4 +40,5 @@ int main() {
 
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".sst");
+    std::filesystem::remove(path.string() + ".repl");
 }

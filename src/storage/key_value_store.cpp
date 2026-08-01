@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -19,13 +20,22 @@ constexpr char kDelete = 'D';
 constexpr char kPutWithTtl = 'E';
 constexpr char kSstableMagic[] = "STRATA02";
 constexpr char kLegacySstableMagic[] = "STRATA01";
+constexpr char kChangesMagic[] = "STRCHG01";
 constexpr std::uint32_t kMaxRecordSize = 256 * 1024 * 1024;
 
 void write_u32(std::ostream& output, std::uint32_t value) {
     output.write(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
+void write_u64(std::ostream& output, std::uint64_t value) {
+    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
 bool read_u32(std::istream& input, std::uint32_t& value) {
+    return static_cast<bool>(input.read(reinterpret_cast<char*>(&value), sizeof(value)));
+}
+
+bool read_u64(std::istream& input, std::uint64_t& value) {
     return static_cast<bool>(input.read(reinterpret_cast<char*>(&value), sizeof(value)));
 }
 
@@ -34,6 +44,7 @@ bool read_u32(std::istream& input, std::uint32_t& value) {
 KeyValueStore::KeyValueStore(std::filesystem::path wal_path, std::uintmax_t compaction_threshold_bytes)
     : wal_path_(std::move(wal_path)),
       sstable_path_(wal_path_.string() + ".sst"),
+      replication_path_(wal_path_.string() + ".repl"),
       compaction_threshold_bytes_(compaction_threshold_bytes) {
     if (compaction_threshold_bytes_ == 0) {
         throw std::invalid_argument("compaction threshold must be greater than zero");
@@ -43,6 +54,7 @@ KeyValueStore::KeyValueStore(std::filesystem::path wal_path, std::uintmax_t comp
     }
     replay_sstable();
     replay();
+    replay_replication_index();
     wal_.open(wal_path_, std::ios::binary | std::ios::app);
     if (!wal_) {
         throw std::runtime_error("unable to open WAL: " + wal_path_.string());
@@ -69,6 +81,7 @@ void KeyValueStore::put(const std::string& key, const std::string& value) {
     }
     std::scoped_lock lock(mutex_);
     append_record(kPut, key, value);
+    append_replication_record(next_sequence_++, kPut, key, value);
     values_[key] = ValueEntry{value, 0};
 }
 
@@ -85,6 +98,7 @@ void KeyValueStore::put(const std::string& key, const std::string& value, std::c
     payload.append(value);
     std::scoped_lock lock(mutex_);
     append_record(kPutWithTtl, key, payload);
+    append_replication_record(next_sequence_++, kPutWithTtl, key, payload);
     values_[key] = ValueEntry{value, expires_at_ms};
 }
 
@@ -104,6 +118,7 @@ bool KeyValueStore::erase(const std::string& key) {
         return false;
     }
     append_record(kDelete, key, {});
+    append_replication_record(next_sequence_++, kDelete, key, {});
     values_.erase(key);
     return true;
 }
@@ -304,6 +319,158 @@ void KeyValueStore::replay() {
             throw std::runtime_error("unknown WAL operation");
         }
     }
+}
+
+void KeyValueStore::replay_replication_index() {
+    std::ifstream input(replication_path_, std::ios::binary);
+    if (!input) {
+        return;
+    }
+    while (input.peek() != std::char_traits<char>::eof()) {
+        std::uint64_t sequence = 0;
+        std::uint32_t key_size = 0;
+        std::uint32_t payload_size = 0;
+        char operation = 0;
+        if (!read_u64(input, sequence) || !input.get(operation) ||
+            !read_u32(input, key_size) || !read_u32(input, payload_size)) {
+            throw std::runtime_error("truncated replication journal header");
+        }
+        if (sequence == 0 || key_size == 0 || key_size > 16 * 1024 * 1024 || payload_size > kMaxRecordSize) {
+            throw std::runtime_error("invalid replication journal record");
+        }
+        input.seekg(static_cast<std::streamoff>(key_size + payload_size), std::ios::cur);
+        if (!input) {
+            throw std::runtime_error("truncated replication journal record");
+        }
+        next_sequence_ = std::max(next_sequence_, sequence + 1);
+    }
+}
+
+void KeyValueStore::append_replication_record(std::uint64_t sequence, char operation,
+                                               const std::string& key, const std::string& payload) {
+    std::ofstream output(replication_path_, std::ios::binary | std::ios::app);
+    if (!output) {
+        throw std::runtime_error("unable to open replication journal: " + replication_path_.string());
+    }
+    write_u64(output, sequence);
+    output.put(operation);
+    write_u32(output, static_cast<std::uint32_t>(key.size()));
+    write_u32(output, static_cast<std::uint32_t>(payload.size()));
+    output.write(key.data(), static_cast<std::streamsize>(key.size()));
+    output.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    output.flush();
+    if (!output) {
+        throw std::runtime_error("unable to append replication journal");
+    }
+}
+
+std::string KeyValueStore::export_changes(std::uint64_t after_sequence) const {
+    struct Change {
+        std::uint64_t sequence;
+        char operation;
+        std::string key;
+        std::string payload;
+    };
+    std::vector<Change> changes;
+    std::ifstream input(replication_path_, std::ios::binary);
+    if (input) {
+        while (input.peek() != std::char_traits<char>::eof()) {
+            Change change{};
+            std::uint32_t key_size = 0;
+            std::uint32_t payload_size = 0;
+            if (!read_u64(input, change.sequence) || !input.get(change.operation) ||
+                !read_u32(input, key_size) || !read_u32(input, payload_size)) {
+                throw std::runtime_error("truncated replication journal header");
+            }
+            if (key_size == 0 || key_size > 16 * 1024 * 1024 || payload_size > kMaxRecordSize) {
+                throw std::runtime_error("invalid replication journal record");
+            }
+            change.key.resize(key_size);
+            change.payload.resize(payload_size);
+            if (!input.read(change.key.data(), static_cast<std::streamsize>(key_size)) ||
+                !input.read(change.payload.data(), static_cast<std::streamsize>(payload_size))) {
+                throw std::runtime_error("truncated replication journal record");
+            }
+            if (change.sequence > after_sequence) {
+                changes.push_back(std::move(change));
+            }
+        }
+    }
+
+    std::ostringstream output(std::ios::binary);
+    output.write(kChangesMagic, sizeof(kChangesMagic) - 1);
+    write_u32(output, static_cast<std::uint32_t>(changes.size()));
+    for (const auto& change : changes) {
+        write_u64(output, change.sequence);
+        output.put(change.operation);
+        write_u32(output, static_cast<std::uint32_t>(change.key.size()));
+        write_u32(output, static_cast<std::uint32_t>(change.payload.size()));
+        output.write(change.key.data(), static_cast<std::streamsize>(change.key.size()));
+        output.write(change.payload.data(), static_cast<std::streamsize>(change.payload.size()));
+    }
+    return output.str();
+}
+
+void KeyValueStore::import_changes(const std::string& changes) {
+    if (changes.size() < sizeof(kChangesMagic) - 1) {
+        throw std::invalid_argument("invalid changes payload");
+    }
+    std::istringstream input(changes, std::ios::binary);
+    char magic[sizeof(kChangesMagic) - 1]{};
+    if (!input.read(magic, sizeof(magic)) ||
+        !std::equal(std::begin(magic), std::end(magic), std::begin(kChangesMagic))) {
+        throw std::invalid_argument("invalid changes header");
+    }
+    std::uint32_t count = 0;
+    if (!read_u32(input, count) || count > 1000000) {
+        throw std::invalid_argument("invalid changes count");
+    }
+
+    std::scoped_lock lock(mutex_);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint64_t sequence = 0;
+        char operation = 0;
+        std::uint32_t key_size = 0;
+        std::uint32_t payload_size = 0;
+        if (!read_u64(input, sequence) || !input.get(operation) ||
+            !read_u32(input, key_size) || !read_u32(input, payload_size) ||
+            sequence == 0 || key_size == 0 || key_size > 16 * 1024 * 1024 || payload_size > kMaxRecordSize) {
+            throw std::invalid_argument("invalid change record");
+        }
+        std::string key(key_size, '\0');
+        std::string payload(payload_size, '\0');
+        if (!input.read(key.data(), static_cast<std::streamsize>(key_size)) ||
+            !input.read(payload.data(), static_cast<std::streamsize>(payload_size))) {
+            throw std::invalid_argument("truncated change record");
+        }
+        if (operation != kPut && operation != kPutWithTtl && operation != kDelete) {
+            throw std::invalid_argument("unknown change operation");
+        }
+        append_record(operation == kPutWithTtl ? kPutWithTtl : operation, key, payload);
+        append_replication_record(sequence, operation, key, payload);
+        if (operation == kPut) {
+            values_[key] = ValueEntry{payload, 0};
+        } else if (operation == kPutWithTtl) {
+            if (payload.size() < sizeof(std::int64_t)) {
+                throw std::invalid_argument("invalid TTL change");
+            }
+            std::int64_t expires_at_ms = 0;
+            std::memcpy(&expires_at_ms, payload.data(), sizeof(expires_at_ms));
+            if (expires_at_ms > now_ms()) {
+                values_[key] = ValueEntry{payload.substr(sizeof(expires_at_ms)), expires_at_ms};
+            } else {
+                values_.erase(key);
+            }
+        } else {
+            values_.erase(key);
+        }
+        next_sequence_ = std::max(next_sequence_, sequence + 1);
+    }
+}
+
+std::uint64_t KeyValueStore::last_sequence() const {
+    std::scoped_lock lock(mutex_);
+    return next_sequence_ - 1;
 }
 
 void KeyValueStore::write_sstable() {

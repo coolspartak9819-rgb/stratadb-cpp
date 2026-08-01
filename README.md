@@ -35,6 +35,7 @@ The first vertical slice includes:
 | Background maintenance | A dedicated worker compacts the WAL asynchronously after the size threshold is reached |
 | TTL | `PUT /kv/key?ttl=60` expires the key after 60 seconds and survives restart |
 | Snapshot sync | A replica can import a binary snapshot from another StrataDB node |
+| Incremental sync | Mutations are recorded in a sequence-numbered replication journal |
 | Concurrent access | Store operations are protected by a mutex and HTTP requests are handled in separate threads |
 | HTTP interface | `GET`, `PUT`, `DELETE`, health, metrics and a browser status page |
 | Reproducible delivery | Docker image, Compose setup, CMake tests and GitHub Actions CI |
@@ -50,6 +51,8 @@ POST /compact   ──►  sorted SSTable snapshot + WAL reset
 PUT /kv/key?ttl=60 ──►  durable value with expiration timestamp
 GET /replication/snapshot ──►  binary SSTable snapshot
 POST /replication/snapshot ──►  replace local state from snapshot
+GET /replication/changes?after=N ──►  changes with sequence > N
+POST /replication/changes ──►  apply a change batch idempotently
 ```
 
 ## Run
@@ -111,7 +114,15 @@ curl http://localhost:18081/kv/order-1
 ```
 
 The next replication milestone is incremental WAL shipping with sequence
-numbers, followed by leader election and quorum acknowledgements.
+numbers, followed by leader election and quorum acknowledgements. The current
+incremental journal can be synchronized with:
+
+```bash
+scripts/replica-sync.sh http://localhost:18080 http://localhost:18081
+```
+
+Applying the same change batch twice produces the same final state. This is a
+replication primitive, not yet a consensus protocol.
 
 The WAL is mounted at `data/stratadb.wal`. Restarting the container restores
 the key-value state from the log.
