@@ -29,6 +29,7 @@ The first vertical slice includes:
 | --- | --- |
 | Durable writes | Every `PUT` and `DELETE` is appended to the binary WAL before the in-memory state changes |
 | Crash recovery | The WAL is replayed during startup and restores the latest state |
+| Compaction | `POST /compact` writes a sorted SSTable and safely resets the WAL |
 | Concurrent access | Store operations are protected by a mutex and HTTP requests are handled in separate threads |
 | HTTP interface | `GET`, `PUT`, `DELETE`, health, metrics and a browser status page |
 | Reproducible delivery | Docker image, Compose setup, CMake tests and GitHub Actions CI |
@@ -40,6 +41,7 @@ PUT /kv/user-1  ──►  WAL append  ──►  memory update  ──►  201 
 GET /kv/user-1  ──►  memory lookup  ──►  200 OK + value
 DELETE /kv/user-1 ─►  WAL append  ──►  memory erase  ──►  204 No Content
 GET /metrics    ──►  request counter + key count
+POST /compact   ──►  sorted SSTable snapshot + WAL reset
 ```
 
 ## Run
@@ -68,6 +70,12 @@ Metrics:
 
 ```bash
 curl http://localhost:8080/metrics
+```
+
+Compact the current state into an SSTable:
+
+```bash
+curl -X POST http://localhost:8080/compact
 ```
 
 The WAL is mounted at `data/stratadb.wal`. Restarting the container restores
@@ -109,6 +117,7 @@ ctest --test-dir build --output-on-failure
 
 ## Roadmap
 
-The next milestones are MemTable and SSTable storage, background compaction,
-snapshots, TTL, benchmarks, Prometheus histograms and a three-node replication
-layer. Each milestone will be backed by tests and a reproducible demo.
+The current storage layer has a WAL, an in-memory table and sorted SSTable
+compaction. The next milestones are background compaction, snapshots, TTL,
+benchmarks, Prometheus histograms and a three-node replication layer. Each
+milestone will be backed by tests and a reproducible demo.

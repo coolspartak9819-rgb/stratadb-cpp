@@ -20,10 +20,14 @@ int main() {
         stratadb::KeyValueStore restored(path);
         assert(!restored.get("name"));
         restored.put("binary", "value with spaces");
+        restored.put("compacted", "before compaction");
+        restored.compact();
     }
     {
         stratadb::KeyValueStore restored(path);
         assert(restored.get("binary") == "value with spaces");
+        assert(restored.get("compacted") == "before compaction");
     }
     std::filesystem::remove(path);
+    std::filesystem::remove(path.string() + ".sst");
 }

@@ -153,6 +153,9 @@ void HttpServer::handle_client(int client_fd) {
             response(client_fd, 200, "application/json", "{\"status\":\"ok\"}");
         } else if (request.target == "/metrics") {
             response(client_fd, 200, "text/plain; version=0.0.4", "stratadb_http_requests_total " + std::to_string(requests_total_.load()) + "\nstratadb_keys " + std::to_string(store_.size()) + "\n");
+        } else if (request.target == "/compact" && request.method == "POST") {
+            store_.compact();
+            response(client_fd, 200, "application/json", "{\"status\":\"compacted\"}");
         } else if (request.target.rfind("/kv/", 0) == 0) {
             const auto key = request.target.substr(4);
             if (key.empty() || key.find('/') != std::string::npos) {
