@@ -19,6 +19,7 @@ The first vertical slice includes:
 • append-only binary WAL;
 • replay and recovery after process restart;
 • background compaction when the WAL reaches its configured threshold;
+• optional key expiration with TTL persisted through WAL and SSTable files;
 • HTTP API for `GET`, `PUT` and `DELETE`;
 • health endpoint and Prometheus-style metrics;
 • a minimal browser status page;
@@ -32,6 +33,7 @@ The first vertical slice includes:
 | Crash recovery | The WAL is replayed during startup and restores the latest state |
 | Compaction | `POST /compact` writes a sorted SSTable and safely resets the WAL |
 | Background maintenance | A dedicated worker compacts the WAL asynchronously after the size threshold is reached |
+| TTL | `PUT /kv/key?ttl=60` expires the key after 60 seconds and survives restart |
 | Concurrent access | Store operations are protected by a mutex and HTTP requests are handled in separate threads |
 | HTTP interface | `GET`, `PUT`, `DELETE`, health, metrics and a browser status page |
 | Reproducible delivery | Docker image, Compose setup, CMake tests and GitHub Actions CI |
@@ -44,6 +46,7 @@ GET /kv/user-1  ──►  memory lookup  ──►  200 OK + value
 DELETE /kv/user-1 ─►  WAL append  ──►  memory erase  ──►  204 No Content
 GET /metrics    ──►  request counter + key count
 POST /compact   ──►  sorted SSTable snapshot + WAL reset
+PUT /kv/key?ttl=60 ──►  durable value with expiration timestamp
 ```
 
 ## Run
@@ -80,6 +83,13 @@ Compact the current state into an SSTable:
 curl -X POST http://localhost:8080/compact
 ```
 
+Store a value with a one-minute TTL:
+
+```bash
+curl -X PUT 'http://localhost:8080/kv/session?ttl=60' \
+  --data 'temporary value'
+```
+
 The WAL is mounted at `data/stratadb.wal`. Restarting the container restores
 the key-value state from the log.
 
@@ -109,6 +119,20 @@ The storage format is intentionally small and inspectable: each mutation is
 written as an operation byte followed by key and value lengths and their raw
 bytes. The store replays the SSTable first and then the append-only WAL before
 accepting requests. A background worker keeps the WAL from growing forever.
+
+## Benchmark
+
+The repository includes a small reproducible benchmark without external
+dependencies:
+
+```bash
+cmake --build build --target stratadb_benchmark
+./build/stratadb_benchmark
+```
+
+The benchmark writes and reads 10,000 values and prints elapsed time and
+operations per second. It is intended for comparing storage changes, not as a
+production performance claim.
 
 ## Local Build
 

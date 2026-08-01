@@ -1,7 +1,9 @@
 #include "storage/key_value_store.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -13,7 +15,9 @@ namespace {
 
 constexpr char kPut = 'P';
 constexpr char kDelete = 'D';
-constexpr char kSstableMagic[] = "STRATA01";
+constexpr char kPutWithTtl = 'E';
+constexpr char kSstableMagic[] = "STRATA02";
+constexpr char kLegacySstableMagic[] = "STRATA01";
 constexpr std::uint32_t kMaxRecordSize = 256 * 1024 * 1024;
 
 void write_u32(std::ostream& output, std::uint32_t value) {
@@ -64,21 +68,38 @@ void KeyValueStore::put(const std::string& key, const std::string& value) {
     }
     std::scoped_lock lock(mutex_);
     append_record(kPut, key, value);
-    values_[key] = value;
+    values_[key] = ValueEntry{value, 0};
+}
+
+void KeyValueStore::put(const std::string& key, const std::string& value, std::chrono::seconds ttl) {
+    if (key.empty()) {
+        throw std::invalid_argument("key must not be empty");
+    }
+    if (ttl <= std::chrono::seconds::zero()) {
+        throw std::invalid_argument("TTL must be greater than zero");
+    }
+    const auto expires_at_ms = now_ms() + ttl.count() * 1000;
+    std::string payload(sizeof(expires_at_ms), '\0');
+    std::memcpy(payload.data(), &expires_at_ms, sizeof(expires_at_ms));
+    payload.append(value);
+    std::scoped_lock lock(mutex_);
+    append_record(kPutWithTtl, key, payload);
+    values_[key] = ValueEntry{value, expires_at_ms};
 }
 
 std::optional<std::string> KeyValueStore::get(const std::string& key) const {
     std::scoped_lock lock(mutex_);
     const auto found = values_.find(key);
-    if (found == values_.end()) {
+    if (found == values_.end() || is_expired(found->second, now_ms())) {
         return std::nullopt;
     }
-    return found->second;
+    return found->second.value;
 }
 
 bool KeyValueStore::erase(const std::string& key) {
     std::scoped_lock lock(mutex_);
-    if (!values_.contains(key)) {
+    const auto found = values_.find(key);
+    if (found == values_.end() || is_expired(found->second, now_ms())) {
         return false;
     }
     append_record(kDelete, key, {});
@@ -88,7 +109,20 @@ bool KeyValueStore::erase(const std::string& key) {
 
 std::size_t KeyValueStore::size() const {
     std::scoped_lock lock(mutex_);
-    return values_.size();
+    const auto current_time_ms = now_ms();
+    return static_cast<std::size_t>(std::count_if(values_.begin(), values_.end(), [current_time_ms](const auto& item) {
+        return !is_expired(item.second, current_time_ms);
+    }));
+}
+
+std::int64_t KeyValueStore::now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+bool KeyValueStore::is_expired(const ValueEntry& entry, std::int64_t current_time_ms) {
+    return entry.expires_at_ms != 0 && entry.expires_at_ms <= current_time_ms;
 }
 
 void KeyValueStore::compact() {
@@ -151,8 +185,12 @@ void KeyValueStore::replay_sstable() {
     }
 
     char magic[sizeof(kSstableMagic) - 1]{};
-    if (!input.read(magic, sizeof(magic)) ||
-        !std::equal(std::begin(magic), std::end(magic), std::begin(kSstableMagic))) {
+    if (!input.read(magic, sizeof(magic))) {
+        throw std::runtime_error("invalid SSTable header");
+    }
+    const bool current_format = std::equal(std::begin(magic), std::end(magic), std::begin(kSstableMagic));
+    const bool legacy_format = std::equal(std::begin(magic), std::end(magic), std::begin(kLegacySstableMagic));
+    if (!current_format && !legacy_format) {
         throw std::runtime_error("invalid SSTable header");
     }
 
@@ -167,13 +205,17 @@ void KeyValueStore::replay_sstable() {
             key_size == 0 || key_size > 16 * 1024 * 1024 || value_size > kMaxRecordSize) {
             throw std::runtime_error("invalid SSTable record");
         }
+        std::int64_t expires_at_ms = 0;
+        if (current_format && !input.read(reinterpret_cast<char*>(&expires_at_ms), sizeof(expires_at_ms))) {
+            throw std::runtime_error("truncated SSTable expiration");
+        }
         std::string key(key_size, '\0');
         std::string value(value_size, '\0');
         if (!input.read(key.data(), static_cast<std::streamsize>(key_size)) ||
             !input.read(value.data(), static_cast<std::streamsize>(value_size))) {
             throw std::runtime_error("truncated SSTable record");
         }
-        values_[std::move(key)] = std::move(value);
+        values_[std::move(key)] = ValueEntry{std::move(value), expires_at_ms};
     }
 }
 
@@ -201,7 +243,17 @@ void KeyValueStore::replay() {
             throw std::runtime_error("truncated WAL record");
         }
         if (operation == kPut) {
-            values_[key] = std::move(value);
+            values_[key] = ValueEntry{std::move(value), 0};
+        } else if (operation == kPutWithTtl) {
+            if (value.size() < sizeof(std::int64_t)) {
+                throw std::runtime_error("invalid TTL WAL record");
+            }
+            std::int64_t expires_at_ms = 0;
+            std::memcpy(&expires_at_ms, value.data(), sizeof(expires_at_ms));
+            const auto actual_value = value.substr(sizeof(expires_at_ms));
+            if (expires_at_ms > now_ms()) {
+                values_[key] = ValueEntry{actual_value, expires_at_ms};
+            }
         } else if (operation == kDelete) {
             values_.erase(key);
         } else {
@@ -213,8 +265,11 @@ void KeyValueStore::replay() {
 void KeyValueStore::write_sstable() {
     std::vector<std::pair<std::string, std::string>> records;
     records.reserve(values_.size());
+    const auto current_time_ms = now_ms();
     for (const auto& [key, value] : values_) {
-        records.emplace_back(key, value);
+        if (!is_expired(value, current_time_ms)) {
+            records.emplace_back(key, value.value);
+        }
     }
     std::sort(records.begin(), records.end(), [](const auto& left, const auto& right) {
         return left.first < right.first;
@@ -230,6 +285,12 @@ void KeyValueStore::write_sstable() {
     for (const auto& [key, value] : records) {
         write_u32(output, static_cast<std::uint32_t>(key.size()));
         write_u32(output, static_cast<std::uint32_t>(value.size()));
+        std::int64_t expires_at_ms = 0;
+        const auto found = values_.find(key);
+        if (found != values_.end()) {
+            expires_at_ms = found->second.expires_at_ms;
+        }
+        output.write(reinterpret_cast<const char*>(&expires_at_ms), sizeof(expires_at_ms));
         output.write(key.data(), static_cast<std::streamsize>(key.size()));
         output.write(value.data(), static_cast<std::streamsize>(value.size()));
     }

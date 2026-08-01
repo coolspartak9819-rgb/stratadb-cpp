@@ -23,6 +23,7 @@ int main() {
         assert(!restored.get("name"));
         restored.put("binary", "value with spaces");
         restored.put("compacted", "before compaction");
+        restored.put("persistent-ttl", "still alive", std::chrono::seconds(60));
         restored.compact();
         const auto compactions_before = restored.compactions_total();
         restored.put("background", std::string(256, 'x'));
@@ -36,6 +37,10 @@ int main() {
         assert(restored.get("binary") == "value with spaces");
         assert(restored.get("compacted") == "before compaction");
         assert(restored.get("background") == std::string(256, 'x'));
+        assert(restored.get("persistent-ttl") == "still alive");
+        restored.put("short-ttl", "temporary", std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+        assert(!restored.get("short-ttl"));
     }
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".sst");

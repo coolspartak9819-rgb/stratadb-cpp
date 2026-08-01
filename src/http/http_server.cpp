@@ -1,12 +1,15 @@
 #include "http/http_server.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <netinet/in.h>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -21,6 +24,23 @@ struct Request {
     std::string target;
     std::string body;
 };
+
+std::optional<std::chrono::seconds> parse_ttl(const std::string& target) {
+    const auto query_start = target.find('?');
+    if (query_start == std::string::npos) {
+        return std::nullopt;
+    }
+    const auto query = target.substr(query_start + 1);
+    constexpr std::string_view prefix = "ttl=";
+    if (query.rfind(prefix, 0) != 0 || query.size() == prefix.size()) {
+        throw std::invalid_argument("invalid ttl query parameter");
+    }
+    const auto seconds = std::stoll(query.substr(prefix.size()));
+    if (seconds <= 0) {
+        throw std::invalid_argument("ttl must be greater than zero");
+    }
+    return std::chrono::seconds(seconds);
+}
 
 std::string html() {
     return R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>StrataDB</title><style>body{margin:0;background:#07090d;color:#eef4f6;font:16px system-ui;padding:40px}main{max-width:760px;margin:auto}h1{font-size:52px;margin:0;color:#18d69b}p{color:#91a0a6}.card{border:1px solid #29404a;background:#0d141a;padding:22px;margin-top:20px}code{color:#24c8ee}</style></head><body><main><div class="card"><h1>StrataDB</h1><p>C++20 durable key-value storage engine</p><p><code>WAL enabled</code> · thread-safe · HTTP API online</p></div></main></body></html>)HTML";
@@ -147,24 +167,31 @@ void HttpServer::handle_client(int client_fd) {
             throw std::invalid_argument("request body too large or incomplete");
         }
         const auto request = parse_request(raw);
-        if (request.target == "/") {
+        const auto query_start = request.target.find('?');
+        const auto path = request.target.substr(0, query_start);
+        if (path == "/") {
             response(client_fd, 200, "text/html; charset=utf-8", html());
-        } else if (request.target == "/health") {
+        } else if (path == "/health") {
             response(client_fd, 200, "application/json", "{\"status\":\"ok\"}");
-        } else if (request.target == "/metrics") {
+        } else if (path == "/metrics") {
             response(client_fd, 200, "text/plain; version=0.0.4", "stratadb_http_requests_total " + std::to_string(requests_total_.load()) + "\nstratadb_keys " + std::to_string(store_.size()) + "\nstratadb_compactions_total " + std::to_string(store_.compactions_total()) + "\n");
-        } else if (request.target == "/compact" && request.method == "POST") {
+        } else if (path == "/compact" && request.method == "POST") {
             store_.compact();
             response(client_fd, 200, "application/json", "{\"status\":\"compacted\"}");
-        } else if (request.target.rfind("/kv/", 0) == 0) {
-            const auto key = request.target.substr(4);
+        } else if (path.rfind("/kv/", 0) == 0) {
+            const auto key = path.substr(4);
             if (key.empty() || key.find('/') != std::string::npos) {
                 response(client_fd, 400, "text/plain", "invalid key\n");
             } else if (request.method == "GET") {
                 const auto value = store_.get(key);
                 response(client_fd, value ? 200 : 404, "text/plain; charset=utf-8", value.value_or("not found\n"));
             } else if (request.method == "PUT") {
-                store_.put(key, request.body);
+                const auto ttl = parse_ttl(request.target);
+                if (ttl) {
+                    store_.put(key, request.body, *ttl);
+                } else {
+                    store_.put(key, request.body);
+                }
                 response(client_fd, 201, "application/json", "{\"status\":\"stored\"}");
             } else if (request.method == "DELETE") {
                 response(client_fd, store_.erase(key) ? 204 : 404, "text/plain", "");

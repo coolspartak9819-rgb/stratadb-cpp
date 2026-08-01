@@ -23,3 +23,6 @@ enable_testing()
 add_executable(stratadb_tests tests/key_value_store_test.cpp)
 target_link_libraries(stratadb_tests PRIVATE stratadb_core)
 add_test(NAME stratadb_tests COMMAND stratadb_tests)
+
+add_executable(stratadb_benchmark bench/storage_benchmark.cpp)
+target_link_libraries(stratadb_benchmark PRIVATE stratadb_core)
