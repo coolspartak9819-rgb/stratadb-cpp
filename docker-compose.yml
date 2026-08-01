@@ -1,0 +1,15 @@
+services:
+  stratadb:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - stratadb-data:/app/data
+    healthcheck:
+      test: ["CMD", "sh", "-c", "printf '' | nc -z localhost 8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  stratadb-data:
