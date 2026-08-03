@@ -11,11 +11,29 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace stratadb {
 
 class KeyValueStore {
 public:
+    struct KeyInfo {
+        std::string key;
+        std::size_t value_size{0};
+        std::int64_t expires_at_ms{0};
+    };
+
+    struct StorageStats {
+        std::size_t keys{0};
+        std::uint64_t last_sequence{0};
+        std::uint64_t compactions_total{0};
+        std::uintmax_t wal_bytes{0};
+        std::uintmax_t sstable_bytes{0};
+        std::uintmax_t replication_bytes{0};
+        std::uintmax_t compaction_threshold_bytes{0};
+    };
+
     explicit KeyValueStore(std::filesystem::path wal_path,
                            std::uintmax_t compaction_threshold_bytes = 4 * 1024 * 1024);
     ~KeyValueStore();
@@ -35,6 +53,8 @@ public:
     std::string export_changes(std::uint64_t after_sequence) const;
     void import_changes(const std::string& changes);
     std::uint64_t last_sequence() const;
+    std::vector<KeyInfo> list_keys() const;
+    StorageStats storage_stats() const;
 
 private:
     struct ValueEntry {
@@ -42,12 +62,23 @@ private:
         std::int64_t expires_at_ms{0};
     };
 
+    struct JournalRecord {
+        std::uint64_t sequence{0};
+        char operation{0};
+        std::string key;
+        std::string payload;
+    };
+
     static std::int64_t now_ms();
     static bool is_expired(const ValueEntry& entry, std::int64_t current_time_ms);
+    std::optional<std::uint64_t> load_sstable(const std::filesystem::path& path,
+                                              std::unordered_map<std::string, ValueEntry>& loaded_values) const;
     void replay_sstable();
-    void replay();
-    void replay_replication_index();
-    void append_record(char operation, const std::string& key, const std::string& value);
+    std::vector<JournalRecord> replay();
+    std::unordered_set<std::uint64_t> replay_replication_index();
+    void repair_replication_index(const std::vector<JournalRecord>& wal_records,
+                                  std::unordered_set<std::uint64_t>& indexed_sequences);
+    void append_record(std::uint64_t sequence, char operation, const std::string& key, const std::string& value);
     void append_replication_record(std::uint64_t sequence, char operation, const std::string& key, const std::string& payload);
     void write_sstable();
     void compact_locked();

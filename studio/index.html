@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>StrataDB Studio</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">S</div>
+          <div>
+            <h1>StrataDB Studio</h1>
+            <p>C++ storage control plane</p>
+          </div>
+        </div>
+
+        <label class="field">
+          <span>Node URL</span>
+          <input id="nodeUrl" value="http://127.0.0.1:8080" spellcheck="false">
+        </label>
+
+        <div class="connection-row">
+          <button id="refreshButton" class="primary">Refresh</button>
+          <span id="connectionState" class="pill danger">offline</span>
+        </div>
+
+        <nav class="tabs" aria-label="Studio sections">
+          <button class="tab active" data-tab="dashboard">Dashboard</button>
+          <button class="tab" data-tab="keys">Keys</button>
+          <button class="tab" data-tab="replication">Replication</button>
+          <button class="tab" data-tab="operations">Operations</button>
+        </nav>
+      </aside>
+
+      <main class="workspace">
+        <section class="topbar">
+          <div>
+            <h2 id="viewTitle">Dashboard</h2>
+            <p id="viewSubtitle">Live health, storage files, and request metrics.</p>
+          </div>
+          <div class="topbar-actions">
+            <button id="compactButton">Compact</button>
+            <button id="clearLogButton">Clear Log</button>
+          </div>
+        </section>
+
+        <section id="dashboard" class="view active">
+          <div class="metrics-grid">
+            <article class="metric">
+              <span>Health</span>
+              <strong id="healthValue">unknown</strong>
+            </article>
+            <article class="metric">
+              <span>Keys</span>
+              <strong id="keysValue">0</strong>
+            </article>
+            <article class="metric">
+              <span>Last Sequence</span>
+              <strong id="sequenceValue">0</strong>
+            </article>
+            <article class="metric">
+              <span>Compactions</span>
+              <strong id="compactionsValue">0</strong>
+            </article>
+          </div>
+
+          <div class="split-grid">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Storage Files</h3>
+                <span id="totalBytes">0 B</span>
+              </div>
+              <div class="bars">
+                <div class="bar-row">
+                  <span>WAL</span>
+                  <div class="bar-track"><div id="walBar" class="bar wal"></div></div>
+                  <code id="walBytes">0 B</code>
+                </div>
+                <div class="bar-row">
+                  <span>SSTable</span>
+                  <div class="bar-track"><div id="sstableBar" class="bar sstable"></div></div>
+                  <code id="sstableBytes">0 B</code>
+                </div>
+                <div class="bar-row">
+                  <span>Replication</span>
+                  <div class="bar-track"><div id="replicationBar" class="bar replication"></div></div>
+                  <code id="replicationBytes">0 B</code>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Request Metrics</h3>
+                <span>Prometheus text</span>
+              </div>
+              <pre id="metricsText" class="metrics-text">Waiting for metrics...</pre>
+            </section>
+          </div>
+        </section>
+
+        <section id="keys" class="view">
+          <div class="panel full">
+            <div class="panel-heading">
+              <h3>Keyspace</h3>
+              <span id="keyCountLabel">0 keys</span>
+            </div>
+            <div id="keyList" class="key-list"></div>
+          </div>
+        </section>
+
+        <section id="replication" class="view">
+          <div class="split-grid">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Replica Status</h3>
+                <span id="replicationState">unknown</span>
+              </div>
+              <dl class="status-list">
+                <div><dt>Last sequence</dt><dd id="replicationSequence">0</dd></div>
+                <div><dt>Journal bytes</dt><dd id="replicationBytesDetail">0 B</dd></div>
+                <div><dt>Snapshot endpoint</dt><dd>/replication/snapshot</dd></div>
+                <div><dt>Changes endpoint</dt><dd>/replication/changes</dd></div>
+              </dl>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Change Export</h3>
+                <span>Binary journal</span>
+              </div>
+              <label class="field compact">
+                <span>After sequence</span>
+                <input id="afterSequence" value="0" inputmode="numeric">
+              </label>
+              <button id="checkChangesButton" class="primary wide">Check Available Changes</button>
+              <p id="changesResult" class="muted">No change batch requested yet.</p>
+            </section>
+          </div>
+        </section>
+
+        <section id="operations" class="view">
+          <div class="split-grid">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Write Value</h3>
+                <span>PUT</span>
+              </div>
+              <label class="field compact">
+                <span>Key</span>
+                <input id="putKey" placeholder="session:42" spellcheck="false">
+              </label>
+              <label class="field compact">
+                <span>Value</span>
+                <textarea id="putValue" placeholder="stored value"></textarea>
+              </label>
+              <label class="field compact">
+                <span>TTL seconds</span>
+                <input id="putTtl" placeholder="optional" inputmode="numeric">
+              </label>
+              <button id="putButton" class="primary wide">Put</button>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Read / Delete</h3>
+                <span>GET / DELETE</span>
+              </div>
+              <label class="field compact">
+                <span>Key</span>
+                <input id="lookupKey" placeholder="session:42" spellcheck="false">
+              </label>
+              <div class="button-row">
+                <button id="getButton" class="primary">Get</button>
+                <button id="deleteButton">Delete</button>
+              </div>
+              <pre id="lookupResult" class="result-box">No lookup yet.</pre>
+            </section>
+          </div>
+        </section>
+
+        <section class="event-log">
+          <div class="panel-heading">
+            <h3>Event Log</h3>
+            <span id="lastUpdated">never refreshed</span>
+          </div>
+          <div id="logList" class="log-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

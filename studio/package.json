@@ -1,0 +1,17 @@
+{
+  "name": "stratadb-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron desktop dashboard for StrataDB",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "preview": "node preview-server.js"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0"
+  },
+  "allowScripts": {
+    "electron@43.2.0": true
+  }
+}

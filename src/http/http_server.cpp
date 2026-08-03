@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
+#include <cctype>
 #include <cstring>
 #include <netinet/in.h>
 #include <optional>
@@ -24,6 +25,63 @@ struct Request {
     std::string target;
     std::string body;
 };
+
+std::string trim_ascii(std::string_view value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+        value.remove_suffix(1);
+    }
+    return std::string(value);
+}
+
+std::string lower_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+std::size_t parse_content_length(const std::string& raw, std::size_t header_end) {
+    const auto request_line_end = raw.find("\r\n");
+    if (request_line_end == std::string::npos || request_line_end >= header_end) {
+        throw std::invalid_argument("invalid HTTP request line");
+    }
+
+    std::optional<std::size_t> content_length;
+    std::size_t cursor = request_line_end + 2;
+    while (cursor < header_end) {
+        const auto line_end = raw.find("\r\n", cursor);
+        if (line_end == std::string::npos || line_end > header_end) {
+            throw std::invalid_argument("invalid HTTP header block");
+        }
+        const std::string_view line(raw.data() + cursor, line_end - cursor);
+        if (line.empty()) {
+            break;
+        }
+        const auto colon = line.find(':');
+        if (colon == std::string_view::npos) {
+            throw std::invalid_argument("invalid HTTP header");
+        }
+        const auto name = lower_ascii(trim_ascii(line.substr(0, colon)));
+        if (name == "content-length") {
+            const auto value = trim_ascii(line.substr(colon + 1));
+            std::size_t parsed_characters = 0;
+            const auto parsed = std::stoull(value, &parsed_characters);
+            if (parsed_characters != value.size() || parsed > kMaxRequestBytes) {
+                throw std::invalid_argument("invalid Content-Length");
+            }
+            const auto length = static_cast<std::size_t>(parsed);
+            if (content_length && *content_length != length) {
+                throw std::invalid_argument("conflicting Content-Length headers");
+            }
+            content_length = length;
+        }
+        cursor = line_end + 2;
+    }
+    return content_length.value_or(0);
+}
 
 std::optional<std::chrono::seconds> parse_ttl(const std::string& target) {
     const auto query_start = target.find('?');
@@ -55,6 +113,70 @@ std::uint64_t parse_after_sequence(const std::string& target) {
     return std::stoull(query.substr(prefix.size()));
 }
 
+std::string json_string(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back('"');
+    for (const unsigned char character : value) {
+        switch (character) {
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '\b':
+                escaped += "\\b";
+                break;
+            case '\f':
+                escaped += "\\f";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                if (character >= 0x20) {
+                    escaped.push_back(static_cast<char>(character));
+                }
+        }
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
+std::string keys_json(const std::vector<KeyValueStore::KeyInfo>& keys) {
+    std::ostringstream output;
+    output << "{\"keys\":[";
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        if (index != 0) {
+            output << ',';
+        }
+        output << "{\"key\":" << json_string(keys[index].key)
+               << ",\"value_size\":" << keys[index].value_size
+               << ",\"expires_at_ms\":" << keys[index].expires_at_ms << '}';
+    }
+    output << "]}";
+    return output.str();
+}
+
+std::string storage_status_json(const KeyValueStore::StorageStats& stats) {
+    std::ostringstream output;
+    output << "{\"keys\":" << stats.keys
+           << ",\"last_sequence\":" << stats.last_sequence
+           << ",\"compactions_total\":" << stats.compactions_total
+           << ",\"wal_bytes\":" << stats.wal_bytes
+           << ",\"sstable_bytes\":" << stats.sstable_bytes
+           << ",\"replication_bytes\":" << stats.replication_bytes
+           << ",\"compaction_threshold_bytes\":" << stats.compaction_threshold_bytes << '}';
+    return output.str();
+}
+
 std::string html() {
     return R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>StrataDB</title><style>body{margin:0;background:#07090d;color:#eef4f6;font:16px system-ui;padding:40px}main{max-width:760px;margin:auto}h1{font-size:52px;margin:0;color:#18d69b}p{color:#91a0a6}.card{border:1px solid #29404a;background:#0d141a;padding:22px;margin-top:20px}code{color:#24c8ee}</style></head><body><main><div class="card"><h1>StrataDB</h1><p>C++20 durable key-value storage engine</p><p><code>WAL enabled</code> · thread-safe · HTTP API online</p></div></main></body></html>)HTML";
 }
@@ -77,11 +199,14 @@ void response(int fd, int status, const std::string& content_type, const std::st
     output << "HTTP/1.1 " << status << ' ' << status_text << "\r\n"
            << "Content-Type: " << content_type << "\r\n"
            << "Content-Length: " << body.size() << "\r\n"
+           << "Access-Control-Allow-Origin: *\r\n"
+           << "Access-Control-Allow-Methods: GET, PUT, POST, DELETE, OPTIONS\r\n"
+           << "Access-Control-Allow-Headers: Content-Type\r\n"
            << "Connection: close\r\n\r\n" << body;
     send_all(fd, output.str());
 }
 
-Request parse_request(const std::string& raw) {
+Request parse_request(const std::string& raw, std::size_t content_length) {
     const auto header_end = raw.find("\r\n\r\n");
     if (header_end == std::string::npos) {
         throw std::invalid_argument("incomplete HTTP request");
@@ -94,7 +219,7 @@ Request parse_request(const std::string& raw) {
     if (request.method.empty() || request.target.empty()) {
         throw std::invalid_argument("invalid HTTP request line");
     }
-    request.body = raw.substr(header_end + 4);
+    request.body = raw.substr(header_end + 4, content_length);
     return request;
 }
 
@@ -161,13 +286,7 @@ void HttpServer::handle_client(int client_fd) {
         if (header_end == std::string::npos) {
             throw std::invalid_argument("request headers too large or incomplete");
         }
-        std::size_t content_length = 0;
-        const auto content_length_position = raw.find("Content-Length:");
-        if (content_length_position != std::string::npos && content_length_position < header_end) {
-            const auto value_start = content_length_position + std::strlen("Content-Length:");
-            const auto value_end = raw.find("\r\n", value_start);
-            content_length = static_cast<std::size_t>(std::stoul(raw.substr(value_start, value_end - value_start)));
-        }
+        const auto content_length = parse_content_length(raw, header_end);
         const auto request_size = header_end + 4 + content_length;
         while (raw.size() < request_size && raw.size() < kMaxRequestBytes) {
             const auto received = ::recv(client_fd, buffer, sizeof(buffer), 0);
@@ -179,15 +298,19 @@ void HttpServer::handle_client(int client_fd) {
         if (raw.size() < request_size) {
             throw std::invalid_argument("request body too large or incomplete");
         }
-        const auto request = parse_request(raw);
+        const auto request = parse_request(raw, content_length);
         const auto query_start = request.target.find('?');
         const auto path = request.target.substr(0, query_start);
-        if (path == "/") {
+        if (request.method == "OPTIONS") {
+            response(client_fd, 204, "text/plain", "");
+        } else if (path == "/") {
             response(client_fd, 200, "text/html; charset=utf-8", html());
         } else if (path == "/health") {
             response(client_fd, 200, "application/json", "{\"status\":\"ok\"}");
         } else if (path == "/metrics") {
             response(client_fd, 200, "text/plain; version=0.0.4", "stratadb_http_requests_total " + std::to_string(requests_total_.load()) + "\nstratadb_keys " + std::to_string(store_.size()) + "\nstratadb_compactions_total " + std::to_string(store_.compactions_total()) + "\n");
+        } else if (path == "/storage/status" && request.method == "GET") {
+            response(client_fd, 200, "application/json", storage_status_json(store_.storage_stats()));
         } else if (path == "/replication/snapshot" && request.method == "GET") {
             response(client_fd, 200, "application/octet-stream", store_.export_snapshot());
         } else if (path == "/replication/snapshot" && request.method == "POST") {
@@ -203,6 +326,8 @@ void HttpServer::handle_client(int client_fd) {
         } else if (path == "/compact" && request.method == "POST") {
             store_.compact();
             response(client_fd, 200, "application/json", "{\"status\":\"compacted\"}");
+        } else if (path == "/kv" && request.method == "GET") {
+            response(client_fd, 200, "application/json", keys_json(store_.list_keys()));
         } else if (path.rfind("/kv/", 0) == 0) {
             const auto key = path.substr(4);
             if (key.empty() || key.find('/') != std::string::npos) {

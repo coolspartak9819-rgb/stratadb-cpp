@@ -16,8 +16,8 @@ problems behind durable backend infrastructure.
 The first vertical slice includes:
 
 • thread-safe in-memory key-value storage;
-• append-only binary WAL;
-• replay and recovery after process restart;
+• append-only binary WAL with sequence metadata and checksums for new records;
+• replay and recovery after process restart, including truncated trailing WAL records;
 • background compaction when the WAL reaches its configured threshold;
 • optional key expiration with TTL persisted through WAL and SSTable files;
 • HTTP API for `GET`, `PUT` and `DELETE`;
@@ -29,13 +29,14 @@ The first vertical slice includes:
 
 | Capability | Evidence |
 | --- | --- |
-| Durable writes | Every `PUT` and `DELETE` is appended to the binary WAL before the in-memory state changes |
-| Crash recovery | The WAL is replayed during startup and restores the latest state |
+| Durable writes | Every `PUT` and `DELETE` is appended and fsynced to the binary WAL before the in-memory state changes |
+| Crash recovery | The WAL is replayed during startup, restores the latest complete state and truncates an incomplete trailing record |
+| Corruption detection | New WAL records include a CRC32 checksum and corrupted complete records are rejected during replay |
 | Compaction | `POST /compact` writes a sorted SSTable and safely resets the WAL |
 | Background maintenance | A dedicated worker compacts the WAL asynchronously after the size threshold is reached |
 | TTL | `PUT /kv/key?ttl=60` expires the key after 60 seconds and survives restart |
-| Snapshot sync | A replica can import a binary snapshot from another StrataDB node |
-| Incremental sync | Mutations are recorded in a sequence-numbered replication journal |
+| Snapshot sync | A replica can import a binary snapshot with a sequence watermark from another StrataDB node |
+| Incremental sync | Mutations are recorded in a fsynced, sequence-numbered replication journal with trailing-partial recovery and WAL-backed repair |
 | Concurrent access | Store operations are protected by a mutex and HTTP requests are handled in separate threads |
 | HTTP interface | `GET`, `PUT`, `DELETE`, health, metrics and a browser status page |
 | Reproducible delivery | Docker image, Compose setup, CMake tests and GitHub Actions CI |
@@ -61,12 +62,19 @@ POST /replication/changes ──►  apply a change batch idempotently
 docker compose up --build
 ```
 
+Use a local base URL for the examples:
 
+```bash
+export STRATADB_SCHEME=http
+export STRATADB_HOST=127.0.0.1
+export STRATADB_PORT=8080
+export STRATADB_URL="${STRATADB_SCHEME}://${STRATADB_HOST}:${STRATADB_PORT}"
+```
 
 Store a value:
 
 ```bash
-curl -X PUT http://localhost:8080/kv/user-1 \
+curl -X PUT "${STRATADB_URL}/kv/user-1" \
   -H 'Content-Type: text/plain' \
   --data 'Igor'
 ```
@@ -74,43 +82,85 @@ curl -X PUT http://localhost:8080/kv/user-1 \
 Read it back:
 
 ```bash
-curl http://localhost:8080/kv/user-1
+curl "${STRATADB_URL}/kv/user-1"
 ```
 
 Metrics:
 
 ```bash
-curl http://localhost:8080/metrics
+curl "${STRATADB_URL}/metrics"
+```
+
+List live keys for StrataDB Studio:
+
+```bash
+curl "${STRATADB_URL}/kv"
+curl "${STRATADB_URL}/storage/status"
 ```
 
 Compact the current state into an SSTable:
 
 ```bash
-curl -X POST http://localhost:8080/compact
+curl -X POST "${STRATADB_URL}/compact"
 ```
 
 Store a value with a one-minute TTL:
 
 ```bash
-curl -X PUT 'http://localhost:8080/kv/session?ttl=60' \
+curl -X PUT "${STRATADB_URL}/kv/session?ttl=60" \
   --data 'temporary value'
+```
+
+## StrataDB Studio
+
+The repository includes `studio/`, an Electron desktop dashboard for the C++
+HTTP node. It shows health, key count, sequence position, storage file sizes,
+metrics, key metadata, replication status and common `PUT` / `GET` / `DELETE` /
+`compact` operations.
+
+Start StrataDB first:
+
+```bash
+docker compose up --build
+```
+
+Then launch the Studio:
+
+```bash
+cd studio
+npm install
+npm start
+```
+
+For a browser preview without Electron:
+
+```bash
+cd studio
+npm run preview
 ```
 
 ## Two-Node Snapshot Sync
 
 The repository includes a two-node Compose demo. It is deliberately snapshot
 replication, not a pretend consensus algorithm: the primary serves a complete
-binary snapshot and the replica atomically installs it.
+binary snapshot with the latest applied sequence, and the replica atomically
+installs it.
 
 ![Snapshot replication](docs/replication.svg)
 
 ```bash
 docker compose -f docker-compose.cluster.yml up --build -d
-curl -X PUT http://localhost:18080/kv/order-1 --data 'ready'
-curl http://localhost:18080/replication/snapshot > /tmp/stratadb.snapshot
-curl -X POST http://localhost:18081/replication/snapshot \
+export STRATADB_SCHEME=http
+export STRATADB_HOST=127.0.0.1
+export PRIMARY_PORT=18080
+export REPLICA_PORT=18081
+export PRIMARY_URL="${STRATADB_SCHEME}://${STRATADB_HOST}:${PRIMARY_PORT}"
+export REPLICA_URL="${STRATADB_SCHEME}://${STRATADB_HOST}:${REPLICA_PORT}"
+curl -X PUT "${PRIMARY_URL}/kv/order-1" --data 'ready'
+curl "${PRIMARY_URL}/replication/snapshot" > /tmp/stratadb.snapshot
+curl -X POST "${REPLICA_URL}/replication/snapshot" \
   --data-binary @/tmp/stratadb.snapshot
-curl http://localhost:18081/kv/order-1
+curl "${REPLICA_URL}/kv/order-1"
 ```
 
 The next replication milestone is incremental WAL shipping with sequence
@@ -118,11 +168,14 @@ numbers, followed by leader election and quorum acknowledgements. The current
 incremental journal can be synchronized with:
 
 ```bash
-scripts/replica-sync.sh http://localhost:18080 http://localhost:18081
+scripts/replica-sync.sh "${PRIMARY_URL}" "${REPLICA_URL}"
 ```
 
-Applying the same change batch twice produces the same final state. This is a
-replication primitive, not yet a consensus protocol.
+Applying the same change batch twice is idempotent, and a replica rejects change
+batches with sequence gaps. On startup, an incomplete final replication-journal
+record is truncated. New WAL records also carry the mutation sequence, so startup
+can repair missing replication-journal entries from durable WAL records. This is
+a replication primitive, not yet a consensus protocol.
 
 The WAL is mounted at `data/stratadb.wal`. Restarting the container restores
 the key-value state from the log.
@@ -132,17 +185,18 @@ the key-value state from the log.
 The following scenario is covered by the local smoke test:
 
 ```text
-$ curl -X PUT http://localhost:8080/kv/demo --data 'persistent value'
+$ curl -X PUT "${STRATADB_URL}/kv/demo" --data 'persistent value'
 {"status":"stored"}
 
 $ docker compose restart stratadb
 
-$ curl http://localhost:8080/kv/demo
+$ curl "${STRATADB_URL}/kv/demo"
 persistent value
 ```
 
 The value is read from the replayed WAL after the process restart, not from a
-preloaded fixture.
+preloaded fixture. If the final WAL record is only partially written, startup
+keeps the last complete state and truncates the partial tail.
 
 ## Verification
 
@@ -152,7 +206,13 @@ a Docker image build on every push and pull request.
 The storage format is intentionally small and inspectable: each mutation is
 written as an operation byte followed by key and value lengths and their raw
 bytes. The store replays the SSTable first and then the append-only WAL before
-accepting requests. A background worker keeps the WAL from growing forever.
+accepting requests. Current SSTables include a sequence watermark so snapshot
+replicas can continue with incremental sync without replaying older changes. A
+background worker keeps the WAL from growing forever. WAL replay treats an
+incomplete final record as a crash tail, not as committed data. New WAL records
+include their replication sequence and a CRC32 checksum, which lets the store
+rebuild missing replication-journal entries after restart and reject corrupted
+complete WAL records.
 
 ## Benchmark
 
